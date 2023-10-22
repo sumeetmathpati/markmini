@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -13,59 +15,147 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-type Config struct {
+type App struct {
+	Explorer      *widget.List
 	EditWidget    *widget.Entry
 	PreviewWidget *widget.RichText
 	CurrentFile   fyne.URI
+	CurrentDir    string // This will be shown in expolorer.
 	SaveMenuItem  *fyne.MenuItem
+	win           *fyne.Window
 }
 
-func (app *Config) MakeUI() (*widget.Entry, *widget.RichText, *widget.List) {
+func (app *App) CreateUiElements() (*widget.Entry, *widget.RichText, *widget.List) {
 
-	data := []string{"1", "2", "3"}
+	// File explorer
+	explorer := app.makeExplorer()
+	app.Explorer = explorer
 
-	explorer := widget.NewList(
-		func() int {
-			return len(data)
-		},
-		func() fyne.CanvasObject {
-			button := widget.NewButton("Do Something", nil)
-			button.SetIcon(theme.FileIcon())
-			return button
-		},
-		func(i widget.ListItemID, o fyne.CanvasObject) {
-			o.(*widget.Button).OnTapped = func() {
-				fmt.Println("I am button " + data[i])
-			}
-
-		})
-
+	// MarkdownEditor
 	edit := widget.NewMultiLineEntry()
+	app.EditWidget = edit
+
+	// Rich text output
 	preview := widget.NewRichTextFromMarkdown("")
 	preview.Scroll = container.ScrollBoth
-
-	app.EditWidget = edit
 	app.PreviewWidget = preview
 
 	edit.OnChanged = preview.ParseMarkdown
 
+	app.createMenuItems()
+
 	return edit, preview, explorer
 }
 
-func (app *Config) CreateMenuItems(window fyne.Window) {
-	openMenuItem := fyne.NewMenuItem("Open", app.openFunc(window))
-	saveMenuItem := fyne.NewMenuItem("Save", app.saveFunc(window))
-	saveAsMenuItem := fyne.NewMenuItem("Save as", app.saveAsFunc(window))
+func (app *App) UpdateUi() {
+	explorerSplit := container.NewHSplit(app.Explorer, container.NewHSplit(app.EditWidget, app.PreviewWidget))
+	explorerSplit.SetOffset(0.15)
+	(*app.win).SetContent(explorerSplit)
+}
+
+func (app *App) makeExplorer() *widget.List {
+	files := app.getCurrentDirFiles()
+
+	explorer := widget.NewList(
+		func() int {
+			return len(files)
+		},
+		func() fyne.CanvasObject {
+			button := widget.NewButton("Do Something", nil)
+			button.SetIcon(theme.FileIcon())
+			button.Alignment = widget.ButtonAlignLeading
+			return button
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			o.(*widget.Button).SetText(files[i].Name())
+			if files[i].IsDir() {
+				o.(*widget.Button).SetIcon(theme.FolderIcon())
+			}
+			o.(*widget.Button).OnTapped = app.onFileClick(o.(*widget.Button))
+		})
+	return explorer
+}
+
+func (app *App) getCurrentDirFiles() []os.DirEntry {
+	/*
+		Get the files and folders in the CurrentDir attribute, and
+		return list of strings.
+	*/
+
+	files, err := os.ReadDir(app.CurrentDir)
+	if err != nil {
+		fmt.Fprintln(os.Stdout, "Error reading directory:", err)
+		os.Exit(1)
+	}
+
+	return files
+}
+
+func (app *App) onFileClick(btn *widget.Button) func() {
+	return func() {
+
+		absolutePath := filepath.Join(app.CurrentDir, btn.Text)
+		isDir, err := isDir(absolutePath)
+		if err != nil {
+			dialog.ShowError(err, *app.win)
+		}
+
+		if isDir {
+			app.CurrentDir = absolutePath
+			app.Explorer = app.makeExplorer()
+			app.UpdateUi()
+		} else {
+
+		}
+	}
+}
+
+func (app *App) createMenuItems() {
+	openMenuItem := fyne.NewMenuItem("Open", app.openFunc(*app.win))
+	saveMenuItem := fyne.NewMenuItem("Save", app.saveFunc(*app.win))
+	saveAsMenuItem := fyne.NewMenuItem("Save as", app.saveAsFunc(*app.win))
 
 	app.SaveMenuItem = saveMenuItem
 	app.SaveMenuItem.Disabled = true
 
 	fileMenu := fyne.NewMenu("File", openMenuItem, saveMenuItem, saveAsMenuItem)
 	menu := fyne.NewMainMenu(fileMenu)
-	window.SetMainMenu(menu)
+	(*app.win).SetMainMenu(menu)
 }
 
-func (app *Config) saveFunc(win fyne.Window) func() {
+func (app *App) openFunc(win fyne.Window) func() {
+	return func() {
+
+		openDialog := dialog.NewFileOpen(func(read fyne.URIReadCloser, err error) {
+			if err != nil {
+				dialog.ShowError(err, win)
+				return
+			}
+
+			if read == nil {
+				return
+			}
+
+			defer read.Close()
+
+			data, err := io.ReadAll(read)
+			if err != nil {
+				dialog.ShowError(err, win)
+				return
+			}
+
+			app.EditWidget.SetText(string(data))
+			app.CurrentFile = read.URI()
+			win.SetTitle(win.Title() + " - " + read.URI().Name())
+			app.SaveMenuItem.Disabled = false
+		}, win)
+
+		openDialog.SetFilter(filter)
+		openDialog.Show()
+	}
+}
+
+func (app *App) saveFunc(win fyne.Window) func() {
 	return func() {
 		if app.CurrentFile != nil {
 			write, err := storage.Writer(app.CurrentFile)
@@ -79,7 +169,7 @@ func (app *Config) saveFunc(win fyne.Window) func() {
 	}
 }
 
-func (app *Config) saveAsFunc(win fyne.Window) func() {
+func (app *App) saveAsFunc(win fyne.Window) func() {
 	return func() {
 		saveDialog := dialog.NewFileSave(func(write fyne.URIWriteCloser, err error) {
 			if err != nil {
@@ -106,36 +196,5 @@ func (app *Config) saveAsFunc(win fyne.Window) func() {
 		saveDialog.SetFileName("untitled.md")
 		saveDialog.SetFilter(filter)
 		saveDialog.Show()
-	}
-}
-
-func (app *Config) openFunc(win fyne.Window) func() {
-	return func() {
-		openDialog := dialog.NewFileOpen(func(read fyne.URIReadCloser, err error) {
-			if err != nil {
-				dialog.ShowError(err, win)
-				return
-			}
-
-			if read == nil {
-				return
-			}
-
-			defer read.Close()
-
-			data, err := ioutil.ReadAll(read)
-			if err != nil {
-				dialog.ShowError(err, win)
-				return
-			}
-
-			app.EditWidget.SetText(string(data))
-			app.CurrentFile = read.URI()
-			win.SetTitle(win.Title() + " - " + read.URI().Name())
-			app.SaveMenuItem.Disabled = false
-		}, win)
-
-		openDialog.SetFilter(filter)
-		openDialog.Show()
 	}
 }
